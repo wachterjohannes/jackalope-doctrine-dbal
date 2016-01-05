@@ -25,19 +25,14 @@ use PHPCR\SimpleCredentials;
 use PHPCR\PathNotFoundException;
 use PHPCR\Query\InvalidQueryException;
 use PHPCR\NodeType\ConstraintViolationException;
-
-use PHPCR\UnsupportedRepositoryOperationException;
 use PHPCR\Util\QOM\Sql2ToQomQueryConverter;
 use PHPCR\Util\ValueConverter;
 use PHPCR\Util\UUIDHelper;
 use PHPCR\Util\PathHelper;
-
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Driver\PDOConnection;
 use Doctrine\DBAL\DBALException;
 use Doctrine\DBAL\Platforms\PostgreSqlPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
-
 use Jackalope\Node;
 use Jackalope\Property;
 use Jackalope\Query\Query;
@@ -134,14 +129,30 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
     private $checkLoginOnServer = true;
 
     /**
-     * @var \ArrayObject
+     * Using an ArrayObject here so that we can pass this into the NodeProcessor by reference more elegantly
+     *
+     * @var null|\ArrayObject
      */
     protected $namespaces;
 
     /**
-     * @var array The namespaces at initial state, in case of rollback.
+     * @var null|array The namespaces at initial state when making changes to the namespaces, in case of rollback.
      */
-    private $originalNamespaces = array();
+    private $originalNamespaces;
+
+    /**
+     * The core namespaces defined in JCR
+     *
+     * @var array
+     */
+    private $coreNamespaces = array(
+        NamespaceRegistryInterface::PREFIX_EMPTY => NamespaceRegistryInterface::NAMESPACE_EMPTY,
+        NamespaceRegistryInterface::PREFIX_JCR => NamespaceRegistryInterface::NAMESPACE_JCR,
+        NamespaceRegistryInterface::PREFIX_NT => NamespaceRegistryInterface::NAMESPACE_NT,
+        NamespaceRegistryInterface::PREFIX_MIX => NamespaceRegistryInterface::NAMESPACE_MIX,
+        NamespaceRegistryInterface::PREFIX_XML => NamespaceRegistryInterface::NAMESPACE_XML,
+        NamespaceRegistryInterface::PREFIX_SV => NamespaceRegistryInterface::NAMESPACE_SV,
+    );
 
     /**
      * @var string|null
@@ -195,17 +206,16 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         $this->factory = $factory;
         $this->valueConverter = $this->factory->get('PHPCR\Util\ValueConverter');
         $this->conn = $conn;
-        $this->namespaces = new \ArrayObject();
     }
 
     /**
      * @TODO: move to "SqlitePlatform" and rename to "registerExtraFunctions"?
      *
-     * @param PDOConnection $sqliteConnection
+     * @param \PDO $sqliteConnection
      *
      * @return Client
      */
-    private function registerSqliteFunctions(PDOConnection $sqliteConnection)
+    private function registerSqliteFunctions(\PDO $sqliteConnection)
     {
         $sqliteConnection->sqliteCreateFunction('EXTRACTVALUE', function ($string, $expression) {
             if (null === $string) {
@@ -279,7 +289,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
     protected function getUuidGenerator()
     {
         if (!$this->uuidGenerator) {
-            $this->uuidGenerator = function() {
+            $this->uuidGenerator = function () {
                 return UUIDHelper::generateUUID();
             };
         }
@@ -513,6 +523,11 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         );
     }
 
+    /**
+     * Get the registered namespace prefixes
+     *
+     * @return array
+     */
     private function getNamespacePrefixes()
     {
         return array_keys($this->getNamespaces());
@@ -533,27 +548,30 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      */
     protected function getNamespacesObject()
     {
-        if ($this->namespaces->count() === 0) {
-            $query = 'SELECT * FROM phpcr_namespaces';
-            $data = $this->getConnection()->fetchAll($query);
+        if (null === $this->namespaces) {
+            $query = 'SELECT prefix, uri FROM phpcr_namespaces';
+            $result = $this->getConnection()->query($query);
+            $namespaces = (array) $result->fetchAll(\PDO::FETCH_KEY_PAIR);
+            $namespaces += $this->coreNamespaces;
 
-            $this->namespaces->exchangeArray(array(
-                NamespaceRegistryInterface::PREFIX_EMPTY => NamespaceRegistryInterface::NAMESPACE_EMPTY,
-                NamespaceRegistryInterface::PREFIX_JCR => NamespaceRegistryInterface::NAMESPACE_JCR,
-                NamespaceRegistryInterface::PREFIX_NT => NamespaceRegistryInterface::NAMESPACE_NT,
-                NamespaceRegistryInterface::PREFIX_MIX => NamespaceRegistryInterface::NAMESPACE_MIX,
-                NamespaceRegistryInterface::PREFIX_XML => NamespaceRegistryInterface::NAMESPACE_XML,
-                NamespaceRegistryInterface::PREFIX_SV => NamespaceRegistryInterface::NAMESPACE_SV,
-            ));
-
-            foreach ($data as $row) {
-                $this->namespaces[$row['prefix']] = $row['uri'];
-            }
-
-            $this->originalNamespaces = $this->namespaces;
+            $this->setNamespaces($namespaces);
         }
 
         return $this->namespaces;
+    }
+
+    /**
+     * Set the namespaces property to an \ArrayObject instance
+     *
+     * @param array|\ArrayObject $namespaces
+     */
+    protected function setNamespaces($namespaces)
+    {
+        if ($this->namespaces instanceof \ArrayObject) {
+            $this->namespaces->exchangeArray($namespaces);
+        } else {
+            $this->namespaces = new \ArrayObject($namespaces);
+        }
     }
 
     /**
@@ -589,16 +607,16 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
 
         PathHelper::assertValidAbsolutePath($dstAbsPath, true, true, $this->getNamespacePrefixes());
 
-        $srcNodeId = $this->getSystemIdForNodePath($srcAbsPath, $srcWorkspace);
+        $srcNodeId = $this->getSystemIdForNode($srcAbsPath, $srcWorkspace);
         if (!$srcNodeId) {
             throw new PathNotFoundException("Source path '$srcAbsPath' not found");
         }
 
-        if ($this->getSystemIdForNodePath($dstAbsPath)) {
+        if ($this->getSystemIdForNode($dstAbsPath)) {
             throw new ItemExistsException("Cannot copy to destination path '$dstAbsPath' that already exists.");
         }
 
-        if (!$this->getSystemIdForNodePath(PathHelper::getParentPath($dstAbsPath))) {
+        if (!$this->getSystemIdForNode(PathHelper::getParentPath($dstAbsPath))) {
             throw new PathNotFoundException("Parent of the destination path '" . $dstAbsPath . "' has to exist.");
         }
 
@@ -684,7 +702,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
                 '   SELECT ?, b.property_name, ?, b.idx, b.data FROM phpcr_binarydata b WHERE b.node_id = ?';
 
             try {
-                $this->getConnection()->executeUpdate($query, array($newNodeId, $this->workspaceName, $srcNodeId));
+                $this->getConnection()->executeUpdate($query, array($newNodeId, $this->workspaceName, $row['id']));
             } catch (DBALException $e) {
                 throw new RepositoryException("Unexpected exception while copying node from $srcAbsPath to $dstAbsPath", $e->getCode(), $e);
             }
@@ -727,12 +745,12 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
     /**
      * Actually write the node into the database
      *
-     * @param string  $uuid      node uuid
-     * @param string  $path      absolute path of the node
-     * @param string  $type      node type
-     * @param boolean $isNewNode new nodes to insert (true) or existing node to update (false)
-     * @param array   $props
-     * @param array   $propsData
+     * @param string     $uuid      node uuid
+     * @param string     $path      absolute path of the node
+     * @param string     $type      node type name
+     * @param boolean    $isNewNode new nodes to insert (true) or existing node to update (false)
+     * @param Property[] $props
+     * @param array      $propsData
      *
      * @return boolean|string
      *
@@ -779,13 +797,13 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
                     'depth'           => PathHelper::getPathDepth($path),
                     'parent_a'        => PathHelper::getParentPath($path),
                 ));
-            } catch(\Exception $e) {
+            } catch (\Exception $e) {
                 if ($e instanceof \PDOException || $e instanceof DBALException) {
-                   if(strpos($e->getMessage(), "SQLSTATE[23") !== false) {
-                       throw new ItemExistsException('Item ' . $path . ' already exists in the database');
-                   } else {
-                       throw new RepositoryException('Unknown database error while inserting item ' . $path . ': '.$e->getMessage(), 0, $e);
-                   }
+                    if (strpos($e->getMessage(), "SQLSTATE[23") !== false) {
+                        throw new ItemExistsException('Item ' . $path . ' already exists in the database');
+                    } else {
+                        throw new RepositoryException('Unknown database error while inserting item ' . $path . ': '.$e->getMessage(), 0, $e);
+                    }
                 } else {
                     throw $e;
                 }
@@ -793,7 +811,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
 
             $nodeId = $this->getConnection()->lastInsertId($this->sequenceNodeName);
         } else {
-            $nodeId = $this->getSystemIdForNodePath($path);
+            $nodeId = $this->getSystemIdForNode($path);
             if (!$nodeId) {
                 throw new RepositoryException("nodeId for $path not found");
             }
@@ -812,9 +830,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
             $this->syncBinaryData($nodeId, $propsData['binaryData']);
         }
 
-        if (!empty($propsData['references'])) {
-            $this->referencesToUpdate[$nodeId] = array('path' => $path, 'properties' => $propsData['references']);
-        }
+        $this->referencesToUpdate[$nodeId] = array('path' => $path, 'properties' => $propsData['references']);
 
         return $nodeId;
     }
@@ -845,26 +861,27 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         }
     }
 
-    private function syncReferences($referencesToUpdate)
+    private function syncReferences(array $referencesToUpdate)
     {
         if ($referencesToUpdate) {
             // do not update references that are going to be deleted anyways
-            $toUpdate = array_diff_assoc($referencesToUpdate, $this->referencesToDelete);
+            $toUpdate = array_diff(array_keys($referencesToUpdate), array_keys($this->referencesToDelete));
 
             try {
                 foreach ($this->referenceTables as $table) {
                     $query = "DELETE FROM $table WHERE source_id IN (?)";
-                    $this->executeChunkedUpdate($query, array_keys($toUpdate));
+                    $this->executeChunkedUpdate($query, $toUpdate);
                 }
             } catch (DBALException $e) {
                 throw new RepositoryException('Unexpected exception while cleaning up after saving', $e->getCode(), $e);
             }
 
             $updates = array();
-            foreach ($toUpdate as $nodeId => $references) {
+            foreach ($toUpdate as $nodeId) {
+                $references = $referencesToUpdate[$nodeId];
                 foreach ($references['properties'] as $name => $data) {
                     foreach ($data['values'] as $value) {
-                        $targetId = $this->getSystemIdForNodeUuid($value);
+                        $targetId = $this->getSystemIdForNode($value);
                         if (false === $targetId) {
                             if (PropertyType::REFERENCE === $data['type']) {
                                 throw new ReferentialIntegrityException(sprintf(
@@ -1008,7 +1025,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      * @param \DOMElement $propertyNode
      * @param \stdClass $data
      */
-    protected function mapPropertyFromElement(\DOMElement $propertyNode, \stdClass $data) 
+    protected function mapPropertyFromElement(\DOMElement $propertyNode, \stdClass $data)
     {
         $name = $propertyNode->getAttribute('sv:name');
 
@@ -1063,7 +1080,6 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
                 break;
         }
     }
-    
 
     /**
      * Seperate properties array into an xml and binary data.
@@ -1095,7 +1111,6 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         $binaryData = $references = array();
 
         foreach ($properties as $property) {
-
             $targetDoms = array('stringDom');
 
             switch ($property->getType()) {
@@ -1183,7 +1198,6 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         );
 
         foreach ($doms as $targetDom => $properties) {
-
             $dom = new \DOMDocument('1.0', 'UTF-8');
             $rootNode = $dom->createElement('sv:node');
             foreach ($namespaces as $namespace => $uri) {
@@ -1240,7 +1254,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         PathHelper::assertValidAbsolutePath($path, false, true, $this->getNamespacePrefixes());
 
         $values[':path'] = $path;
-        $values[':pathd'] = rtrim($path,'/') . '/%';
+        $values[':pathd'] = rtrim($path, '/') . '/%';
         $values[':workspace'] = $this->workspaceName;
 
         if ($this->fetchDepth > 0) {
@@ -1398,7 +1412,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
             $i = 0;
             foreach ($paths as $path) {
                 $params[':path'.$i] = $path;
-                $params[':pathd'.$i] = rtrim($path,'/') . '/%';
+                $params[':pathd'.$i] = rtrim($path, '/') . '/%';
                 $subquery = 'SELECT depth FROM phpcr_nodes WHERE path = :path'.$i.' AND workspace_name = :workspace';
                 $query .= '(path LIKE :pathd'.$i.' OR path = :path'.$i.') AND depth <= ((' . $subquery . ') + :fetchDepth) OR ';
                 $i++;
@@ -1440,52 +1454,34 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      */
     private function pathExists($path, $workspaceName = null)
     {
-        return (boolean) $this->getSystemIdForNodePath($path, $workspaceName);
+        return (boolean) $this->getSystemIdForNode($path, $workspaceName);
     }
 
     /**
-     * Get the database primary key for node at path.
+     * Get the database primary key for node.
      *
-     * @param string $path          Path of the node
+     * @param string $identifier    Path of the identifier
      * @param string $workspaceName To overwrite the current workspace
      *
      * @return bool|string The database id
      */
-    private function getSystemIdForNodePath($path, $workspaceName = null)
+    private function getSystemIdForNode($identifier, $workspaceName = null)
     {
         if (null === $workspaceName) {
             $workspaceName = $this->workspaceName;
         }
 
-        if ($this->getConnection()->getDriver() instanceof \Doctrine\DBAL\Driver\PDOMySql\Driver) {
-            $query = 'SELECT id FROM phpcr_nodes WHERE path COLLATE utf8_bin = ? AND workspace_name = ?';
+        if (UUIDHelper::isUUID($identifier)) {
+            $query = 'SELECT id FROM phpcr_nodes WHERE identifier = ? AND workspace_name = ?';
         } else {
-            $query = 'SELECT id FROM phpcr_nodes WHERE path = ? AND workspace_name = ?';
+            if ($this->getConnection()->getDriver() instanceof \Doctrine\DBAL\Driver\PDOMySql\Driver) {
+                $query = 'SELECT id FROM phpcr_nodes WHERE path COLLATE utf8_bin = ? AND workspace_name = ?';
+            } else {
+                $query = 'SELECT id FROM phpcr_nodes WHERE path = ? AND workspace_name = ?';
+            }
         }
 
-        if ($nodeId = $this->getConnection()->fetchColumn($query, array($path, $workspaceName))) {
-            return $nodeId;
-        }
-
-        return false;
-    }
-
-    /**
-     * Get the database primary key for node at path.
-     *
-     * @param string $uuid          Uuid of the node
-     * @param string $workspaceName To overwrite the current workspace
-     *
-     * @return bool|string The database id
-     */
-    protected function getSystemIdForNodeUuid($uuid, $workspaceName = null)
-    {
-        if (null === $workspaceName) {
-            $workspaceName = $this->workspaceName;
-        }
-
-        $query = 'SELECT id FROM phpcr_nodes WHERE identifier = ? AND workspace_name = ?';
-        $nodeId = $this->getConnection()->fetchColumn($query, array($uuid, $workspaceName));
+        $nodeId = $this->getConnection()->fetchColumn($query, array($identifier, $workspaceName));
 
         return $nodeId ?: false;
     }
@@ -1644,7 +1640,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
     private function cleanIdentifierCache($root)
     {
         unset($this->nodeIdentifiers[$root]);
-        foreach(array_keys($this->nodeIdentifiers) as $path) {
+        foreach (array_keys($this->nodeIdentifiers) as $path) {
             if (strpos($path, "$root/") === 0) {
                 unset($this->nodeIdentifiers[$path]);
             }
@@ -1685,7 +1681,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         $this->assertLoggedIn();
 
         $nodePath = PathHelper::getParentPath($path);
-        $nodeId = $this->getSystemIdForNodePath($nodePath);
+        $nodeId = $this->getSystemIdForNode($nodePath);
         if (!$nodeId) {
             // no we really don't know that path
             throw new ItemNotFoundException("No item found at ".$path);
@@ -1773,11 +1769,11 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
             throw new PathNotFoundException("Source path '$srcAbsPath' not found");
         }
 
-        if ($this->getSystemIdForNodePath($dstAbsPath)) {
+        if ($this->getSystemIdForNode($dstAbsPath)) {
             throw new ItemExistsException("Cannot move '$srcAbsPath' to '$dstAbsPath' because destination node already exists.");
         }
 
-        if (!$this->getSystemIdForNodePath(PathHelper::getParentPath($dstAbsPath))) {
+        if (!$this->getSystemIdForNode(PathHelper::getParentPath($dstAbsPath))) {
             throw new PathNotFoundException("Parent of the destination path '" . $dstAbsPath . "' has to exist.");
         }
 
@@ -2043,7 +2039,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
                     'multiple' => (bool) $propertyData['multiple'],
                     'isFulltextSearchable' => (bool) $propertyData['fulltext_searchable'],
                     'isQueryOrderable' => (bool) $propertyData['query_orderable'],
-                    'queryOperators' => array (
+                    'queryOperators' => array(
                         0 => 'jcr.operator.equal.to',
                         1 => 'jcr.operator.not.equal.to',
                         2 => 'jcr.operator.greater.than',
@@ -2179,19 +2175,24 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
 
     /**
      * {@inheritDoc}
+     * @throws RepositoryException when no binary data found
      */
     public function getBinaryStream($path)
     {
         $this->assertLoggedIn();
 
         $nodePath = PathHelper::getParentPath($path);
-        $nodeId = $this->getSystemIdForNodePath($nodePath);
+        $nodeId = $this->getSystemIdForNode($nodePath);
         $propertyName = PathHelper::getNodeName($path);
 
         $data = $this->getConnection()->fetchAll(
             'SELECT data, idx FROM phpcr_binarydata WHERE node_id = ? AND property_name = ? AND workspace_name = ?',
             array($nodeId, $propertyName, $this->workspaceName)
         );
+
+        if (count($data) === 0) {
+            throw new RepositoryException('No binary data found in stream');
+        }
 
         $streams = array();
         foreach ($data as $row) {
@@ -2206,13 +2207,18 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
             $streams[] = $stream;
         }
 
-        // TODO even a multi value field could have only one value stored
-        // we need to also fetch if the property is multi valued instead of this count() check
-        if (count($data) > 1) {
-            return $streams;
+        if (count($data) === 1) {
+            // we don't know if this is a multivalue property or not.
+            // TODO we should have something more efficient to know this. a flag in the database?
+
+            // TODO use self::getProperty()->isMultiple() once implemented
+            $node = $this->getNode($nodePath);
+            if (!is_array($node->{':'.$propertyName})) {
+                return reset($streams);
+            }
         }
 
-        return reset($streams);
+        return $streams;
     }
 
     /**
@@ -2220,7 +2226,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      */
     public function getProperty($path)
     {
-        throw new NotImplementedException('Getting properties by path is implemented yet');
+        throw new NotImplementedException('Getting properties by path is not implemented yet');
     }
 
     /**
@@ -2364,13 +2370,43 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
     }
 
     /**
+     * We need to create an in memory backup when we are inside a transaction
+     * so that we can efficiently restore the original state in the namespaces
+     * property in case of a rollback.
+     *
+     * This method also ensures that namespaces are loaded to begin with.
+     */
+    private function ensureNamespacesBackup()
+    {
+        if (!$this->namespaces instanceof \ArrayObject) {
+            $this->getNamespacesObject();
+        }
+
+        if (!$this->inTransaction) {
+            return;
+        }
+
+        if (null === $this->originalNamespaces) {
+            $this->originalNamespaces = $this->namespaces->getArrayCopy();
+        }
+    }
+
+    /**
      * {@inheritDoc}
      */
     public function registerNamespace($prefix, $uri)
     {
-        if (isset($this->namespaces[$prefix]) && $this->namespaces[$prefix] === $uri) {
-            return;
+        if (isset($this->namespaces[$prefix])) {
+            if ($this->namespaces[$prefix] === $uri) {
+                return;
+            }
+
+            if (isset($this->coreNamespaces[$prefix])) {
+                throw new NamespaceException("Cannot overwrite JCR core namespace prefix '$prefix' to a new uri '$uri'.");
+            }
         }
+
+        $this->ensureNamespacesBackup();
 
         $this->getConnection()->delete('phpcr_namespaces', array('prefix' => $prefix));
         $this->getConnection()->delete('phpcr_namespaces', array('uri' => $uri));
@@ -2390,6 +2426,12 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      */
     public function unregisterNamespace($prefix)
     {
+        if (isset($this->coreNamespaces[$prefix])) {
+            throw new NamespaceException("Cannot unregister JCR core namespace prefix '$prefix'.");
+        }
+
+        $this->ensureNamespacesBackup();
+
         $this->getConnection()->delete('phpcr_namespaces', array('prefix' => $prefix));
 
         if (!empty($this->namespaces)) {
@@ -2422,7 +2464,7 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
      */
     private function getNodeReferences($path, $name = null, $weakReference = false)
     {
-        $targetId = $this->getSystemIdForNodePath($path);
+        $targetId = $this->getSystemIdForNode($path);
         $params = array($targetId);
 
         $table = $weakReference ? $this->referenceTables[PropertyType::WEAKREFERENCE] : $this->referenceTables[PropertyType::REFERENCE];
@@ -2473,8 +2515,11 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
             $this->inTransaction = false;
 
             $this->getConnection()->commit();
-            // now that the transaction is committed, update the cache of the stored namespaces.
-            $this->originalNamespaces = (array) $this->namespaces;
+
+            if ($this->originalNamespaces) {
+                // now that the transaction is committed, reset the cache of the stored namespaces.
+                $this->originalNamespaces = null;
+            }
         } catch (\Exception $e) {
             throw new RepositoryException('Commit transaction failed: ' . $e->getMessage());
         }
@@ -2494,10 +2539,13 @@ class Client extends BaseTransport implements QueryTransport, WritingInterface, 
         try {
             $this->inTransaction = false;
 
-            // reset namespaces
-            $this->namespaces->exchangeArray($this->originalNamespaces);
-
             $this->getConnection()->rollback();
+
+            if ($this->originalNamespaces) {
+                // reset namespaces
+                $this->setNamespaces($this->originalNamespaces);
+                $this->originalNamespaces = null;
+            }
         } catch (\Exception $e) {
             throw new RepositoryException('Rollback transaction failed: ' . $e->getMessage(), 0, $e);
         }

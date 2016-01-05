@@ -132,31 +132,31 @@ class DBUnitFixtureXML extends XMLDocument
         $this->ids[$uuid] = self::$idCounter++;
 
         return $this->addRow('phpcr_nodes', array(
-            'id'             => $this->ids[$uuid],
-            'path'           => '/',
-            'parent'         => '',
-            'local_name'     => '',
-            'namespace'      => '',
-            'workspace_name' => $workspaceName,
-            'identifier'     => $uuid,
-            'type'           => 'nt:unstructured',
-            'props'          => '<?xml version="1.0" encoding="UTF-8"?>'
-                             . '<sv:node xmlns:crx="http://www.day.com/crx/1.0"'
-                             . 'xmlns:lx="http://flux-cms.org/2.0"'
-                             . 'xmlns:test="http://liip.to/jackalope"'
-                             . 'xmlns:mix="http://www.jcp.org/jcr/mix/1.0"'
-                             . 'xmlns:sling="http://sling.apache.org/jcr/sling/1.0"'
-                             . 'xmlns:nt="http://www.jcp.org/jcr/nt/1.0"'
-                             . 'xmlns:fn_old="http://www.w3.org/2004/10/xpath-functions"'
-                             . 'xmlns:fn="http://www.w3.org/2005/xpath-functions"'
-                             . 'xmlns:vlt="http://www.day.com/jcr/vault/1.0"'
-                             . 'xmlns:xs="http://www.w3.org/2001/XMLSchema"'
-                             . 'xmlns:new_prefix="http://a_new_namespace"'
-                             . 'xmlns:jcr="http://www.jcp.org/jcr/1.0"'
-                             . 'xmlns:sv="http://www.jcp.org/jcr/sv/1.0"'
-                             . 'xmlns:rep="internal" />',
-            'depth'          => 0,
-            'sort_order'     => 0,
+            'id'            => $this->ids[$uuid],
+            'path'          => '/',
+            'parent'        => '',
+            'local_name'    => '',
+            'namespace'     => '',
+            'workspace_name'=> $workspaceName,
+            'identifier'    => $uuid,
+            'type'          => 'nt:unstructured',
+            'props'         => '<?xml version="1.0" encoding="UTF-8"?>'
+                            . '<sv:node xmlns:crx="http://www.day.com/crx/1.0"'
+                            . ' xmlns:lx="http://flux-cms.org/2.0"'
+                            . ' xmlns:test="http://liip.to/jackalope"'
+                            . ' xmlns:mix="http://www.jcp.org/jcr/mix/1.0"'
+                            . ' xmlns:sling="http://sling.apache.org/jcr/sling/1.0"'
+                            . ' xmlns:nt="http://www.jcp.org/jcr/nt/1.0"'
+                            . ' xmlns:fn_old="http://www.w3.org/2004/10/xpath-functions"'
+                            . ' xmlns:fn="http://www.w3.org/2005/xpath-functions"'
+                            . ' xmlns:vlt="http://www.day.com/jcr/vault/1.0"'
+                            . ' xmlns:xs="http://www.w3.org/2001/XMLSchema"'
+                            . ' xmlns:new_prefix="http://a_new_namespace"'
+                            . ' xmlns:jcr="http://www.jcp.org/jcr/1.0"'
+                            . ' xmlns:sv="http://www.jcp.org/jcr/sv/1.0"'
+                            . ' xmlns:rep="internal" />',
+            'depth'         => 0,
+            'sort_order'    => 0,
         ));
     }
 
@@ -252,7 +252,7 @@ class DBUnitFixtureXML extends XMLDocument
 
         foreach ($node->childNodes as $child) {
             if ($child instanceof \DOMElement && $child->tagName == 'sv:property') {
-                list ($name, $propertyNameibute) = $this->getChildAttribute($child);
+                list($name, $propertyNameibute) = $this->getChildAttribute($child);
                 $properties[$name] = $propertyNameibute;
             }
         }

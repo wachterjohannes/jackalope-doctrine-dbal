@@ -191,5 +191,4 @@ class ImplementationLoader extends \PHPCR\Test\AbstractLoader
             $this->fixturePath
         );
     }
-
 }

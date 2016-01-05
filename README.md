@@ -49,7 +49,7 @@ Set up a new database supported by Doctrine DBAL. You can use your favorite GUI 
 
 ### MySQL
 
-Note that you need at least version 5.1.5 of MySQL, otherwise you will get ``QLSTATE[42000]: Syntax error or access violation: 1305 FUNCTION cmf-app.EXTRACTVALUE does not exist``
+Note that you need at least version 5.1.5 of MySQL, otherwise you will get ``SQLSTATE[42000]: Syntax error or access violation: 1305 FUNCTION cmf-app.EXTRACTVALUE does not exist``
 
 ```sh
 $ mysqladmin -u root -p  create jackalope
@@ -175,7 +175,7 @@ $post->setProperty("jcr:description", "This is the first post on my blog! Do you
 $session->save();
 ```
 
-See [PHPCR Tutorial](https://github.com/phpcr/phpcr-docs/blob/master/tutorial/Tutorial.md)
+See [PHPCR Tutorial](http://phpcr.readthedocs.org/en/latest/book/index.html)
 for a more detailed tutorial on how to use the PHPCR API.
 
 
